@@ -1,7 +1,7 @@
 {
   "name": "Barra info",
   "description": "Barra fluttuante in basso, come in Glyphs: coordinate e dimensioni della selezione, side bearing, larghezza e gruppi di kerning, tutti modificabili.",
-  "version": "1.0.0",
+  "version": "1.1.1",
   "init": "infobar.js",
   "function": "start"
 }

@@ -16,6 +16,7 @@ const REF_LABELS = {
 };
 
 const TEXT_FIELDS = new Set(["kernL", "kernR"]);
+const KERN_FIELDS = new Set(["kernPrev", "kernNext"]);
 
 // ---------------------------------------------------------------------------
 // Utilità
@@ -60,6 +61,13 @@ export function evaluateInput(text, current) {
   } catch (e) {
     return null;
   }
+}
+
+// Un'espressione relativa ("+20", "*2", "/2", "--20") si applica a ogni master
+// partendo dal suo valore; un numero o un'espressione assoluta dà a tutti lo stesso valore.
+export function isRelativeInput(text) {
+  const s = String(text).trim();
+  return /^[+*/]/.test(s) || s.startsWith("--");
 }
 
 function parseSelection(selection) {
@@ -145,6 +153,20 @@ function selectionBoundsForGlyph(glyph, sel) {
     if (a) pts.push(a);
   }
   return boundsOfPoints(pts);
+}
+
+// Sposta orizzontalmente tutto il contenuto di un glifo statico (per l'LSB):
+// contorni, componenti, ancore e guide, come fa il pannello di Fontra.
+function shiftGlyphX(lg, dx) {
+  const coords = lg.path?.coordinates;
+  if (coords) {
+    for (let i = 0; i < coords.length; i += 2) coords[i] += dx;
+  }
+  for (const c of lg.components || []) c.transformation.translateX += dx;
+  for (const a of lg.anchors || []) a.x += dx;
+  for (const g of lg.guidelines || []) {
+    if (Number.isFinite(g.x)) g.x += dx;
+  }
 }
 
 function escapeHTML(s) {
@@ -376,6 +398,7 @@ class InfoBarPlugin {
     container.appendChild(this.el);
 
     this.setupInputs();
+    this.setupOutsideClick();
     this.setupDrag();
     this.applyLayoutSettings();
 
@@ -498,7 +521,13 @@ class InfoBarPlugin {
       input.addEventListener("focus", () => {
         input.dataset.original = input.value;
         input.dataset.justFocused = "1";
+        delete input.dataset.dirty;
         input.select();
+      });
+      // Anche riscrivere lo stesso valore conta: con più master in modifica,
+      // gli altri master possono avere un valore diverso da quello mostrato.
+      input.addEventListener("input", () => {
+        input.dataset.dirty = "1";
       });
       input.addEventListener("mouseup", (event) => {
         if (input.dataset.justFocused) {
@@ -509,23 +538,27 @@ class InfoBarPlugin {
       });
       input.addEventListener("keydown", async (event) => {
         if (event.key === "Enter") {
+          // Invio e uscita dal campo fanno la stessa cosa: il blur conferma il valore.
+          // Invio conferma anche un valore non modificato (utile con più master).
           event.preventDefault();
-          await this.commit(field, input.value);
+          input.dataset.dirty = "1";
           this.returnFocusToCanvas();
         } else if (event.key === "Escape") {
           event.preventDefault();
           input.value = input.dataset.original ?? "";
+          delete input.dataset.dirty;
           input.classList.remove("error");
           this.returnFocusToCanvas();
         } else if (!isText && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
           event.preventDefault();
           const step = (event.shiftKey ? 10 : 1) * (event.key === "ArrowUp" ? 1 : -1);
           let current = this.values[field];
-          if (!Number.isFinite(current) && (field === "kernPrev" || field === "kernNext")) {
+          if (!Number.isFinite(current) && KERN_FIELDS.has(field)) {
             current = 0; // nessun kerning finora: si parte da 0
           }
           if (Number.isFinite(current)) {
-            const ok = await this.commit(field, String(current + step));
+            // Passo relativo: con più master, ognuno si sposta dal proprio valore
+            const ok = await this.commit(field, step > 0 ? `+${step}` : `--${-step}`);
             if (ok !== false) {
               this.values[field] = current + step;
               input.value = fmt(current + step);
@@ -536,22 +569,46 @@ class InfoBarPlugin {
         }
         event.stopPropagation();
       });
-      input.addEventListener("change", () => {
-        if (input.value !== input.dataset.original) this.commit(field, input.value);
-      });
+      // Uscire dal campo (clic altrove, Tab, Invio) conferma il valore
       input.addEventListener("blur", () => {
-        input.classList.remove("error");
-        this.scheduleUpdate();
+        const changed = !!input.dataset.dirty || input.value !== (input.dataset.original ?? "");
+        delete input.dataset.dirty;
+        input.dataset.original = input.value;
+        if (!changed) {
+          input.classList.remove("error");
+          this.scheduleUpdate();
+          return;
+        }
+        this.commit(field, input.value).then(
+          (ok) => {
+            if (ok === false) setTimeout(() => input.classList.remove("error"), 1500);
+            this.scheduleUpdate();
+          },
+          () => this.scheduleUpdate()
+        );
       });
     }
   }
 
+  // Cliccando sul canvas Fontra non sempre toglie il focus al campo:
+  // lo togliamo noi, prima che il clic cambi la selezione, così il valore
+  // scritto viene confermato sul glifo e sulla selezione giusti.
+  setupOutsideClick() {
+    window.addEventListener(
+      "pointerdown",
+      (event) => {
+        const active = this.el.shadowRoot.activeElement;
+        if (!active || active.tagName !== "INPUT") return;
+        if (event.composedPath().includes(this.el)) return;
+        active.blur();
+      },
+      true
+    );
+  }
+
   returnFocusToCanvas() {
     const active = this.el.shadowRoot.activeElement;
-    if (active) {
-      active.dataset.original = active.value;
-      active.blur();
-    }
+    if (active) active.blur();
     document.querySelector("#edit-canvas")?.focus();
   }
 
@@ -580,6 +637,15 @@ class InfoBarPlugin {
     return { positioned, glyph, instance: glyph.instance, isEditing, sel, glyphName: glyph.name, selectedGlyph };
   }
 
+  // Nomi dei layer in modifica: più di uno = modifica multimaster attiva
+  getEditingLayerNames() {
+    try {
+      return Object.keys(this.sc.sceneSettings.editingLayers || {});
+    } catch (e) {
+      return [];
+    }
+  }
+
   // Glifi vicini nella riga di testo, per il kerning
   getNeighbors(ctx) {
     const { lineIndex, glyphIndex } = ctx.selectedGlyph || {};
@@ -602,6 +668,63 @@ class InfoBarPlugin {
     }
   }
 
+  getFontAxes() {
+    const fc = this.fontController;
+    return fc.fontAxesSourceSpace || fc.axes?.axes || fc.globalAxes || [];
+  }
+
+  defaultFontLocation() {
+    const loc = {};
+    for (const axis of this.getFontAxes()) {
+      if (axis?.name !== undefined && Number.isFinite(axis.defaultValue)) loc[axis.name] = axis.defaultValue;
+    }
+    return loc;
+  }
+
+  async getFontSources() {
+    try {
+      return (await this.fontController.getSources()) || {};
+    } catch (e) {
+      return this.fontController.sources || {};
+    }
+  }
+
+  // Sorgente del font che corrisponde alla posizione di una sorgente del glifo
+  sourceIdForGlyphLocation(location) {
+    const loc = this.defaultFontLocation();
+    for (const name of Object.keys(loc)) {
+      if (location?.[name] !== undefined) loc[name] = location[name];
+    }
+    try {
+      return this.fontController.fontSourcesInstancer.getSourceIdentifierForLocation(loc, false);
+    } catch (e) {
+      return undefined;
+    }
+  }
+
+  // Master su cui applicare il kerning: quello corrente oppure, con la modifica
+  // multimaster attiva, tutti i master in modifica.
+  async getKernSourceIdentifiers(glyphName, layerNames, currentSource) {
+    if (layerNames.length <= 1) return currentSource ? [currentSource] : [];
+    const fontSources = await this.getFontSources();
+    const known = Object.keys(fontSources);
+    let varGlyph;
+    try {
+      varGlyph = await this.fontController.getGlyph(glyphName);
+    } catch (e) {
+      varGlyph = null;
+    }
+    const ids = new Set();
+    for (const source of varGlyph?.sources || []) {
+      if (!layerNames.includes(source.layerName)) continue;
+      let id = source.locationBase;
+      if (!id || (known.length && !known.includes(id))) id = this.sourceIdForGlyphLocation(source.location);
+      if (id) ids.add(id); // le sorgenti intermedie del glifo non hanno un master: restano fuori
+    }
+    if (currentSource) ids.add(currentSource);
+    return [...ids];
+  }
+
   getKernValue(leftGlyph, rightGlyph) {
     const kc = this.kerningController;
     if (!kc || !leftGlyph || !rightGlyph) return null;
@@ -615,6 +738,49 @@ class InfoBarPlugin {
     } catch (e) {
       return null;
     }
+  }
+
+  // Valore di kerning di una coppia su un master preciso
+  getKernValueForSource(leftGlyph, rightGlyph, sourceIdentifier, fontSources, currentSource) {
+    const kc = this.kerningController;
+    if (!kc) return null;
+    let loc;
+    if (sourceIdentifier === currentSource) {
+      loc = this.sc.sceneSettings.fontLocationSourceMapped;
+    } else {
+      loc = { ...this.defaultFontLocation(), ...(fontSources?.[sourceIdentifier]?.location || {}) };
+    }
+    try {
+      const v = kc.getGlyphPairValue(leftGlyph, rightGlyph, loc, sourceIdentifier);
+      return Number.isFinite(v) ? v : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // Margini di ogni layer in modifica, letti dai controller statici di Fontra
+  // (contano anche i componenti, come nel pannello laterale).
+  async getLayerMargins(glyphName, layerNames) {
+    const result = {};
+    if (!layerNames.length) return result;
+    let varGlyph;
+    try {
+      varGlyph = await this.fontController.getGlyph(glyphName);
+    } catch (e) {
+      return result;
+    }
+    const sources = varGlyph?.sources || [];
+    for (let i = 0; i < sources.length; i++) {
+      const layerName = sources[i].layerName;
+      if (!layerNames.includes(layerName) || layerName in result) continue;
+      try {
+        const c = await this.fontController.getLayerGlyphController(glyphName, layerName, i);
+        if (c) result[layerName] = { lsb: c.leftMargin, rsb: c.rightMargin };
+      } catch (e) {
+        // si userà il valore del master corrente
+      }
+    }
+    return result;
   }
 
   update() {
@@ -750,25 +916,39 @@ class InfoBarPlugin {
 
   async commit(field, text) {
     const input = this.el.input(field);
-    if (TEXT_FIELDS.has(field)) {
-      return this.commitKernGroup(field, text, input);
-    }
-    if (field === "kernPrev" || field === "kernNext") {
-      return this.commitKernValue(field, text, input);
-    }
+    // Tutto quello che serve si legge subito, prima di qualsiasi await: se il
+    // valore viene confermato cliccando sul canvas, subito dopo la selezione
+    // (o il glifo) può cambiare.
+    const ctx = this.getContext();
+    if (!ctx) return false;
     const current = this.values[field];
+    if (TEXT_FIELDS.has(field)) {
+      return this.commitKernGroup(field, text, input, ctx);
+    }
+    if (KERN_FIELDS.has(field)) {
+      return this.commitKernValue(field, text, input, ctx);
+    }
     const value = evaluateInput(text, current);
     if (value === null) {
       this.flashError(input);
       return false;
     }
     input.classList.remove("error");
-    if (Number.isFinite(current) && Math.abs(value - current) < 1e-9) return true;
+    const isMargin = field === "lsb" || field === "rsb";
+    // Per i margini non si esce subito: il master corrente può avere già il
+    // valore giusto mentre gli altri master no.
+    if (!isMargin && Number.isFinite(current) && Math.abs(value - current) < 1e-9) return true;
     try {
       if (["x", "y", "w", "h"].includes(field)) {
-        await this.commitSelection(field, value);
+        await this.commitSelection(field, value, ctx, current);
+      } else if (isMargin) {
+        const ok = await this.commitMargin(field, text, ctx, current);
+        if (ok === false) {
+          this.flashError(input);
+          return false;
+        }
       } else {
-        await this.commitMetrics(field, value);
+        await this.commitMetrics(field, value, current);
       }
     } catch (e) {
       console.error("[Barra info]", e);
@@ -779,11 +959,8 @@ class InfoBarPlugin {
     return true;
   }
 
-  async commitSelection(field, value) {
-    const ctx = this.getContext();
-    if (!ctx) return;
+  async commitSelection(field, value, ctx, current) {
     const { sel } = ctx;
-    const current = this.values[field];
     if (!Number.isFinite(current)) return;
     const ref = this.settings.ref;
 
@@ -839,67 +1016,126 @@ class InfoBarPlugin {
     }, this);
   }
 
-  async commitMetrics(field, value) {
-    const current = this.values[field];
-    if (!Number.isFinite(current)) return;
-    const delta = value - current;
-    // Come nel pannello di Fontra: la differenza viene applicata a tutti i
-    // master in modifica, ognuno a partire dal proprio valore.
+  // LSB / RSB. Un valore assoluto vale uguale per tutti i master in modifica;
+  // un'espressione relativa ("+20", "*2", frecce) parte dal valore di ogni master.
+  async commitMargin(field, text, ctx, current) {
+    const relative = isRelativeInput(text);
+    const absolute = evaluateInput(text, current);
+    const targetFor = (base) => (relative ? evaluateInput(text, base) : absolute);
+    const layerNames = this.getEditingLayerNames();
+
+    const margins = await this.getLayerMargins(ctx.glyphName, layerNames);
+    // Se nel frattempo è stato selezionato un altro glifo, non modifichiamo quello sbagliato
+    if (this.getContext()?.glyphName !== ctx.glyphName) return false;
+
+    const baseFor = (layerName) => {
+      const v = margins[layerName]?.[field];
+      return Number.isFinite(v) ? v : current;
+    };
+    const needsChange = (layerNames.length ? layerNames : [undefined]).some((layerName) => {
+      const base = baseFor(layerName);
+      const target = targetFor(base);
+      return Number.isFinite(base) && Number.isFinite(target) && Math.abs(target - base) > 1e-9;
+    });
+    if (!needsChange) return true;
+
     await this.sc.editLayersAndRecordChanges((layerGlyphs) => {
-      for (const lg of Object.values(layerGlyphs)) {
+      for (const [layerName, lg] of Object.entries(layerGlyphs)) {
+        const base = baseFor(layerName);
+        const target = targetFor(base);
+        if (!Number.isFinite(base) || !Number.isFinite(target)) continue;
+        let d = target - base;
+        if (Math.abs(d) < 1e-9) continue;
         if (field === "lsb") {
-          const d = Math.max(delta, -lg.xAdvance);
-          lg.move(d, 0);
+          d = Math.max(d, -lg.xAdvance);
+          shiftGlyphX(lg, d);
           lg.xAdvance += d;
         } else {
-          lg.xAdvance = Math.max(0, lg.xAdvance + delta);
+          lg.xAdvance = Math.max(0, lg.xAdvance + d);
         }
       }
-      return field === "lsb" ? "Cambia LSB" : field === "rsb" ? "Cambia RSB" : "Cambia larghezza";
+      return field === "lsb" ? "Cambia LSB" : "Cambia RSB";
+    }, this);
+    return true;
+  }
+
+  // Larghezza: come nel pannello di Fontra, la differenza viene applicata a
+  // tutti i master in modifica, ognuno a partire dal proprio valore.
+  async commitMetrics(field, value, current) {
+    if (!Number.isFinite(current)) return;
+    const delta = value - current;
+    await this.sc.editLayersAndRecordChanges((layerGlyphs) => {
+      for (const lg of Object.values(layerGlyphs)) {
+        lg.xAdvance = Math.max(0, lg.xAdvance + delta);
+      }
+      return "Cambia larghezza";
     }, this);
   }
 
-  // Kerning tra il glifo corrente e il vicino. Come lo strumento Metriche di
-  // Fontra, il valore vale per il master su cui ti trovi e usa la coppia già
-  // esistente (glifo o gruppo); se non c'è, quella tra i gruppi, se esistono.
-  async commitKernValue(field, text, input) {
-    const kc = this.kerningController;
-    const ctx = this.getContext();
-    if (!kc || !ctx) return false;
+  // Kerning tra il glifo corrente e il vicino. Vale per il master su cui ti
+  // trovi oppure, con la modifica multimaster attiva, per tutti i master in
+  // modifica. Usa la coppia già esistente (glifo o gruppo) di ogni master;
+  // se non c'è, quella tra i gruppi, se esistono.
+  async commitKernValue(field, text, input, ctx) {
+    if (!this.kerningController) return false;
     const { prev, next } = this.kernInfo;
     const leftGlyph = field === "kernPrev" ? prev : ctx.glyphName;
     const rightGlyph = field === "kernPrev" ? ctx.glyphName : next;
     if (!leftGlyph || !rightGlyph) return false;
 
-    const sourceIdentifier = this.getSourceIdentifier();
-    if (!sourceIdentifier) {
-      this.flashError(input, "Il kerning si modifica solo sulla posizione di un master: spostati su un master.");
-      return false;
-    }
-
     const trimmed = String(text).trim();
-    let value;
-    if (trimmed === "") {
-      value = null; // campo vuoto = nessun kerning per questo master
-    } else {
-      const current = this.values[field];
-      value = evaluateInput(trimmed, Number.isFinite(current) ? current : 0);
-      if (value === null) {
+    const remove = trimmed === ""; // campo vuoto = nessun kerning
+    const relative = !remove && isRelativeInput(trimmed);
+    let absolute = null;
+    if (!remove) {
+      const shown = this.values[field];
+      absolute = evaluateInput(trimmed, Number.isFinite(shown) ? shown : 0);
+      if (absolute === null) {
         this.flashError(input);
         return false;
       }
-      value = Math.round(value);
+      absolute = Math.round(absolute);
     }
-    const current = this.values[field];
-    if ((current ?? null) === value) return true;
+    const currentSource = this.getSourceIdentifier();
+    const layerNames = this.getEditingLayerNames();
     input.classList.remove("error");
 
     try {
+      const sourceIds = await this.getKernSourceIdentifiers(ctx.glyphName, layerNames, currentSource);
+      if (!sourceIds.length) {
+        this.flashError(
+          input,
+          "Il kerning si modifica solo sulla posizione di un master: spostati su un master o attiva la modifica di più master."
+        );
+        return false;
+      }
       const tableChanges = await this.ensureKerningTable();
-      const { leftName, rightName } = kc.getPairNames(leftGlyph, rightGlyph, sourceIdentifier);
-      const label = `Kerning ${leftName} ${rightName}`;
-      const editContext = kc.getEditContext([{ leftName, rightName, sourceIdentifier }]);
-      const changes = await editContext.edit([value], label);
+      const kc = this.kerningController;
+      const fontSources = await this.getFontSources();
+
+      const pairs = [];
+      const newValues = [];
+      for (const id of sourceIds) {
+        const own = this.getKernValueForSource(leftGlyph, rightGlyph, id, fontSources, currentSource);
+        let target = null;
+        if (!remove) {
+          target = relative ? evaluateInput(trimmed, own ?? 0) : absolute;
+          if (target === null) continue;
+          target = Math.round(target);
+        }
+        if ((own ?? null) === target) continue;
+        const { leftName, rightName } = kc.getPairNames(leftGlyph, rightGlyph, id);
+        pairs.push({ leftName, rightName, sourceIdentifier: id });
+        newValues.push(target);
+      }
+
+      if (!pairs.length) {
+        if (tableChanges) this.pushUndo(ctx.glyphName, tableChanges, "Crea tabella di kerning");
+        return true;
+      }
+      const label = `Kerning ${pairs[0].leftName} ${pairs[0].rightName}`;
+      const editContext = kc.getEditContext(pairs);
+      const changes = await editContext.edit(newValues, label);
       this.pushUndo(ctx.glyphName, tableChanges ? tableChanges.concat(changes) : changes, label);
     } catch (e) {
       console.error("[Barra info]", e);
@@ -958,10 +1194,8 @@ class InfoBarPlugin {
     return changes;
   }
 
-  async commitKernGroup(field, text, input) {
-    const kc = this.kerningController;
-    const ctx = this.getContext();
-    if (!kc || !ctx) return false;
+  async commitKernGroup(field, text, input, ctx) {
+    if (!this.kerningController) return false;
     const name = String(text).trim();
     if (name === (this.values[field] || "")) return true;
     if (name && !/^[A-Za-z0-9_.\-]+$/.test(name)) {
