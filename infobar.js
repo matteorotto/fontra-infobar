@@ -502,6 +502,10 @@ class InfoBarPlugin {
       this.setSetting("offsetX", 0);
       this.setSetting("offsetY", 0);
     });
+    // Doppio clic sul nome: rinomina il glifo (serve il plugin "Rinomina e duplica glifi")
+    this.el.$(".title").addEventListener("dblclick", () => {
+      this.editor.__renameDuplicatePlugin?.renameSelectedGlyph();
+    });
     this.el.$("#collapse").addEventListener("click", () => {
       this.setSetting("collapsed", !this.settings.collapsed);
     });
@@ -795,7 +799,10 @@ class InfoBarPlugin {
 
     // Nome e Unicode
     this.el.$("#name").textContent = glyphName || "";
-    this.el.$(".title").title = glyphName || "";
+    this.el.$(".title").title =
+      glyphName && this.editor.__renameDuplicatePlugin
+        ? `${glyphName} · doppio clic per rinominare`
+        : glyphName || "";
     const codePoints = this.fontController.glyphMap?.[glyphName] || [];
     this.el.$("#uni").textContent = codePoints
       .map((cp) => "U+" + cp.toString(16).toUpperCase().padStart(4, "0"))

@@ -16,7 +16,7 @@ Un pannello fluttuante in basso al centro del canvas, come l'info box di Glyphs.
 
 ## Cosa mostra, dall'alto in basso
 
-1. **Nome e Unicode** del glifo.
+1. **Nome e Unicode** del glifo. Con il plugin "Rinomina e duplica glifi" installato, un doppio clic sul nome rinomina il glifo.
 2. **Trasformazioni**, solo con una selezione attiva. Per un nodo mostra X e Y. Per più elementi mostra anche W e H, con la griglia 3×3 per scegliere il punto di riferimento. Per una maniglia mostra anche lo scarto Δ dal suo nodo.
 3. **Side bearing**: LSB, larghezza e RSB. Ai lati c'è il **kerning** con il glifo precedente (◀) e con quello successivo (▶) nella riga di testo. Sopra ogni campo di kerning compare il nome del glifo vicino.
 4. **Gruppi di kerning**: il sinistro sotto l'LSB, il destro sotto l'RSB.
@@ -51,8 +51,8 @@ La **larghezza** e le **trasformazioni** (X, Y, W, H) si comportano come prima: 
 
 1. Crea un repository **pubblico** su GitHub, per esempio `fontra-infobar`.
 2. Carica `plugin.json` e `infobar.js` (va bene anche questo README) nella radice del repository.
-3. Crea una release con tag `v1.1.1`.
-4. In Fontra apri **Fontra → Plugin Manager**, premi **+** e scrivi `https://cdn.jsdelivr.net/gh/TUONOME/fontra-infobar@v1.1.1`.
+3. Crea una release con tag `v1.2.0`.
+4. In Fontra apri **Fontra → Plugin Manager**, premi **+** e scrivi `https://cdn.jsdelivr.net/gh/TUONOME/fontra-infobar@v1.2.0`.
 5. Ricarica l'editor.
 
 Per aggiornare da una versione precedente: crea la nuova release, rimuovi dal Plugin Manager l'indirizzo con il vecchio tag e aggiungi quello nuovo.
